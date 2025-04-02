@@ -169,16 +169,79 @@ function spawnAndWait(videoId, cwd, command, args, isDemucs, isHybrid) {
 }
 
 async function asyncYtdl(videoId, downloadPath) {
-  curYtdlAbortController = new AbortController()
-  const ytdlStream = ytdl(videoId, {
-    highWaterMark: 1024 * 1024 * 64,
-    quality: 'highestaudio',
-  })
-  const fileStream = createWriteStream(downloadPath)
-  await pipeline(ytdlStream, fileStream, {
-    signal: curYtdlAbortController.signal,
-  })
-  curYtdlAbortController = null
+  try {
+    console.log(`Starting YouTube download for video ID: ${videoId}`)
+
+    // Verify that the video exists and is accessible
+    const info = await ytdl.getInfo(videoId)
+    console.log(`Successfully retrieved video info for ${videoId}: ${info.videoDetails.title}`)
+
+    // Check for available audio formats
+    const audioFormats = ytdl.filterFormats(info.formats, 'audioonly')
+    if (audioFormats.length === 0) {
+      throw new Error(`No audio formats available for video ${videoId}`)
+    }
+
+    console.log(`Found ${audioFormats.length} audio formats for video ${videoId}`)
+
+    // Create abort controller for the download
+    curYtdlAbortController = new AbortController()
+
+    // Start the download with the best audio quality
+    const ytdlStream = ytdl(videoId, {
+      quality: 'highestaudio',
+      highWaterMark: 1024 * 1024 * 64,
+    })
+
+    // Set up file stream
+    const fileStream = createWriteStream(downloadPath)
+
+    // Listen for errors on the YouTube stream
+    ytdlStream.on('error', (err) => {
+      console.error(`YouTube download error for ${videoId}:`, err)
+      throw err
+    })
+
+    // Listen for progress events
+    let downloadedBytes = 0
+    const totalBytes = audioFormats[0].contentLength || 0
+
+    ytdlStream.on('progress', (chunkLength, downloaded, total) => {
+      downloadedBytes = downloaded
+      if (total) {
+        const percent = (downloaded / total * 100).toFixed(2)
+        console.log(`Download progress: ${percent}% (${downloaded}/${total})`)
+      } else {
+        console.log(`Download progress: ${downloaded} bytes`)
+      }
+    })
+
+    // Perform the download
+    await pipeline(ytdlStream, fileStream, {
+      signal: curYtdlAbortController.signal,
+    })
+
+    // Verify the download
+    try {
+      await fs.access(downloadPath)
+      const stats = await fs.stat(downloadPath)
+      if (stats.size === 0) {
+        throw new Error(`Download resulted in an empty file for video ${videoId}`)
+      }
+      console.log(`Successfully downloaded ${stats.size} bytes to ${downloadPath}`)
+    } catch (err) {
+      console.error(`Error verifying download file ${downloadPath}:`, err)
+      throw err
+    }
+
+    curYtdlAbortController = null
+  } catch (err) {
+    console.error(`YouTube download failed for video ${videoId}:`, err)
+    if (curYtdlAbortController) {
+      curYtdlAbortController = null
+    }
+    throw err
+  }
 }
 
 async function findDemucsOutputDir(basePath) {
